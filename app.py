@@ -342,10 +342,10 @@ def board_label(board_id):
 def make_session():
     s = requests.Session()
     retry = Retry(
-        total=3,
-        connect=3,
-        read=3,
-        backoff_factor=1.1,
+        total=1,
+        connect=1,
+        read=1,
+        backoff_factor=0.5,
         status_forcelist=[429, 500, 502, 503, 504],
         allowed_methods=["GET", "POST"],
         raise_on_status=False,
@@ -360,17 +360,17 @@ def make_session():
 SESSION = make_session()
 
 
-def fetch_html(url, timeout=30):
+def fetch_html(url, timeout=12):
     last = None
-    for i in range(1, 4):
+    for i in range(1, 3):
         try:
-            r = SESSION.get(url, timeout=(10, timeout))
+            r = SESSION.get(url, timeout=(5, timeout))
             r.raise_for_status()
             r.encoding = r.apparent_encoding or "utf-8"
             return r.text
         except Exception as e:
             last = e
-            time.sleep(i * 1.1)
+            time.sleep(i * 0.5)
     raise last
 
 
@@ -538,10 +538,21 @@ def parse_mfds_board(src, start_date, end_date, max_pages=40):
     return deduped
 
 
-def collect_mfds_to_db(start_date, end_date):
+def collect_mfds_to_db(start_date, end_date, collect_mode="period"):
+    """
+    collect_mode
+    - fast   : 각 게시판 첫 페이지만 확인. 최신 신규 확인용.
+    - period : 선택 기간 전체 수집. 날짜 기준으로 여러 페이지 확인.
+    """
     rows = []
     days = max(1, (end_date - start_date).days + 1)
-    max_pages = 6 if days <= 14 else 15 if days <= 90 else 40
+
+    if collect_mode == "fast":
+        max_pages = 1
+    else:
+        # 기간수집은 누락 방지가 목적이므로 충분히 넉넉하게 확인한다.
+        # 페이지 루프 내부에서 조회 시작일보다 과거 페이지만 나오면 자동 중단된다.
+        max_pages = 10 if days <= 31 else 25 if days <= 180 else 60
 
     for src in MFDS_SOURCES:
         rows.extend(parse_mfds_board(src, start_date, end_date, max_pages=max_pages))
@@ -894,7 +905,7 @@ def hero_html():
       <div class="ha-chip-row">
         <span class="ha-mini-chip"><span class="ha-dot dot-blue"></span>MFDS</span>
         <span class="ha-mini-chip"><span class="ha-dot dot-green"></span>{esc(db_text)}</span>
-        <span class="ha-mini-chip"><span class="ha-dot dot-amber"></span>Manual Collect</span>
+        <span class="ha-mini-chip"><span class="ha-dot dot-amber"></span>Manual Query/Collect</span>
       </div>
     </section>
     """
@@ -1227,54 +1238,96 @@ def main():
 
     components.html(hero_html(), height=210)
 
-    st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
-    c1, c2, c3, spacer = st.columns([1.25, 0.9, 0.72, 1.85])
-    with c1:
-        st.session_state["keyword"] = st.text_input("검색", value=st.session_state["keyword"], placeholder="검색어를 입력하세요", label_visibility="collapsed")
-    with c2:
-        period = st.selectbox("기간", ["오늘", "최근 7일", "최근 14일", "직접 선택"], index=1, label_visibility="collapsed")
-    with c3:
-        collect_clicked = st.button("수동 재수집", type="primary", use_container_width=True)
+    # 조회 조건은 입력값과 적용값을 분리한다.
+    # 기간/검색어를 바꿔도 바로 재수집하지 않고, [조회]를 눌러야 DB 조회 조건에 반영된다.
+    if "applied_keyword" not in st.session_state:
+        st.session_state["applied_keyword"] = ""
+    if "applied_period" not in st.session_state:
+        st.session_state["applied_period"] = "최근 7일"
+    if "applied_start_date" not in st.session_state:
+        st.session_state["applied_start_date"] = None
+    if "applied_end_date" not in st.session_state:
+        st.session_state["applied_end_date"] = None
+    if "status_message" not in st.session_state:
+        st.session_state["status_message"] = ""
 
-    start_date = None
-    end_date = None
-    if period == "직접 선택":
+    st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
+    c1, c2, c3, c4, c5, spacer = st.columns([1.25, 0.9, 0.46, 0.72, 0.72, 1.35])
+    with c1:
+        input_keyword = st.text_input("검색", value=st.session_state.get("keyword", ""), placeholder="검색어를 입력하세요", label_visibility="collapsed", key="keyword_input")
+    with c2:
+        input_period = st.selectbox("기간", ["오늘", "최근 7일", "최근 14일", "직접 선택"], index=["오늘", "최근 7일", "최근 14일", "직접 선택"].index(st.session_state.get("period_input", "최근 7일")) if st.session_state.get("period_input", "최근 7일") in ["오늘", "최근 7일", "최근 14일", "직접 선택"] else 1, label_visibility="collapsed", key="period_input")
+    with c3:
+        query_clicked = st.button("조회", type="secondary", use_container_width=True)
+    with c4:
+        fast_collect_clicked = st.button("빠른수집", type="primary", use_container_width=True)
+    with c5:
+        period_collect_clicked = st.button("기간수집", type="primary", use_container_width=True)
+
+    input_start_date = None
+    input_end_date = None
+    if input_period == "직접 선택":
         d1, d2, spacer2 = st.columns([0.18, 0.18, 0.64])
         with d1:
-            start_date = st.date_input("시작일", value=TODAY - timedelta(days=14))
+            input_start_date = st.date_input("시작일", value=st.session_state.get("start_date_input", TODAY - timedelta(days=14)), key="start_date_input")
         with d2:
-            end_date = st.date_input("종료일", value=TODAY)
-        if start_date > end_date:
-            start_date, end_date = end_date, start_date
+            input_end_date = st.date_input("종료일", value=st.session_state.get("end_date_input", TODAY), key="end_date_input")
+        if input_start_date > input_end_date:
+            input_start_date, input_end_date = input_end_date, input_start_date
             st.warning("시작일이 종료일보다 늦어 자동으로 순서를 바꾸었습니다.")
 
-    collect_start, collect_end = period_dates(period, start_date, end_date)
+    input_collect_start, input_collect_end = period_dates(input_period, input_start_date, input_end_date)
 
-    # Supabase 운영형 기본값: 접속 시 자동 수집 OFF
-    # Secrets에서 AUTO_COLLECT_ON_LOAD = true로 둔 경우에만 1일 1회 자동 수집
-    if get_secret_bool("AUTO_COLLECT_ON_LOAD", False) and get_meta("last_auto_collect_date", "") != TODAY.isoformat():
+    def apply_current_query():
+        st.session_state["keyword"] = input_keyword
+        st.session_state["applied_keyword"] = input_keyword
+        st.session_state["applied_period"] = input_period
+        st.session_state["applied_start_date"] = input_start_date
+        st.session_state["applied_end_date"] = input_end_date
+        st.session_state["main_page"] = 1
+        st.session_state["category_page"] = 1
+
+    if query_clicked:
+        apply_current_query()
+        st.session_state["status_message"] = "조회 조건을 적용했습니다. Supabase DB에 저장된 데이터만 조회합니다."
+        st.rerun()
+
+    auto_collect = get_secret_bool("AUTO_COLLECT_ON_LOAD", False)
+    if auto_collect and get_meta("last_auto_collect_date", "") != TODAY.isoformat():
         with st.spinner("최근 14일 기준 식약처 게시물을 자동 수집하여 DB에 누적 중입니다."):
             auto_collect_once_per_day(TODAY - timedelta(days=14), TODAY)
 
-    if collect_clicked:
-        with st.spinner(f"{collect_start} ~ {collect_end} 기간의 식약처 게시물을 수집하여 Supabase DB에 누적 중입니다."):
-            m_ins, m_skip, m_total = collect_mfds_to_db(collect_start, collect_end)
-        st.success(f"수집 완료: 신규 {m_ins}건, 중복 제외 {m_skip}건")
+    if fast_collect_clicked:
+        apply_current_query()
+        with st.spinner(f"{input_collect_start} ~ {input_collect_end} 기간의 최신 게시물을 빠른수집 중입니다. 각 게시판 첫 페이지만 확인합니다."):
+            m_ins, m_skip, m_total = collect_mfds_to_db(input_collect_start, input_collect_end, collect_mode="fast")
+        st.session_state["status_message"] = f"빠른수집 완료: 신규 {m_ins}건, 중복 제외 {m_skip}건, 확인 {m_total}건"
         st.cache_data.clear()
+        st.rerun()
+
+    if period_collect_clicked:
+        apply_current_query()
+        with st.spinner(f"{input_collect_start} ~ {input_collect_end} 기간 전체를 수집 중입니다. 여러 페이지를 확인하므로 시간이 걸릴 수 있습니다."):
+            m_ins, m_skip, m_total = collect_mfds_to_db(input_collect_start, input_collect_end, collect_mode="period")
+        st.session_state["status_message"] = f"기간수집 완료: 신규 {m_ins}건, 중복 제외 {m_skip}건, 확인 {m_total}건"
+        st.cache_data.clear()
+        st.rerun()
+
+    if st.session_state.get("status_message"):
+        st.info(st.session_state["status_message"])
 
     df = db_load_all()
 
     if df.empty:
         if is_supabase_mode():
-            st.info("Supabase DB에 아직 저장된 데이터가 없습니다. 기간을 선택한 뒤 [수동 재수집]을 눌러 최초 데이터를 수집해 주세요.")
+            st.info("Supabase DB에 아직 저장된 데이터가 없습니다. 기간을 선택한 뒤 [기간수집]을 눌러 최초 데이터를 수집해 주세요.")
         else:
-            st.warning("DATABASE_URL 또는 SUPABASE_DB_URL이 설정되지 않아 Local SQLite fallback으로 실행 중입니다. 온라인 누적 운영은 Supabase 연결 후 사용하세요.")
+            st.warning("DATABASE_URL 또는 SUPABASE_DB_URL이 설정되지 않아 Local SQLite fallback으로 실행 중입니다.")
 
-    period_key = f"{period}|{start_date}|{end_date}|{st.session_state.get('keyword','')}"
-    if period_key != st.session_state.get("last_period_key", ""):
-        st.session_state["main_page"] = 1
-        st.session_state["category_page"] = 1
-        st.session_state["last_period_key"] = period_key
+    period = st.session_state.get("applied_period", "최근 7일")
+    start_date = st.session_state.get("applied_start_date", None)
+    end_date = st.session_state.get("applied_end_date", None)
+    st.session_state["keyword"] = st.session_state.get("applied_keyword", "")
 
     tab1, tab2 = st.tabs(["식약처 정보", "구분별 정보"])
 
