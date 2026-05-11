@@ -83,20 +83,46 @@ MFDS_SOURCES = [
 # -----------------------------
 # DB
 # -----------------------------
-def get_database_url():
-    try:
-        db_url = st.secrets.get("DATABASE_URL", "")
-    except Exception:
-        db_url = ""
+def get_secret_value(*names, default=""):
+    for name in names:
+        try:
+            value = st.secrets.get(name, "")
+        except Exception:
+            value = ""
+        if value not in [None, ""]:
+            return str(value)
 
-    if not db_url:
-        db_url = os.environ.get("DATABASE_URL", "")
+        value = os.environ.get(name, "")
+        if value:
+            return str(value)
+
+    return default
+
+
+def get_secret_bool(name, default=False):
+    try:
+        value = st.secrets.get(name, None)
+    except Exception:
+        value = None
+    if value is None:
+        value = os.environ.get(name, None)
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in ["1", "true", "yes", "y", "on"]
+
+
+def get_database_url():
+    # Supabase 운영형: DATABASE_URL 또는 SUPABASE_DB_URL 중 하나를 사용
+    db_url = get_secret_value("DATABASE_URL", "SUPABASE_DB_URL", default="")
 
     if db_url:
         if db_url.startswith("postgres://"):
             db_url = db_url.replace("postgres://", "postgresql://", 1)
         return db_url
 
+    # 로컬 테스트용 fallback
     return "sqlite:///" + str(LOCAL_DB_PATH).replace("\\", "/")
 
 
@@ -111,6 +137,10 @@ def get_engine():
 
 def is_external_db():
     return not get_database_url().startswith("sqlite:///")
+
+
+def is_supabase_mode():
+    return is_external_db()
 
 
 def init_db():
@@ -854,7 +884,7 @@ tr:last-child td { border-bottom: none; }
 
 
 def hero_html():
-    db_text = "External PostgreSQL" if is_external_db() else "Local SQLite"
+    db_text = "Supabase DB" if is_supabase_mode() else "Local SQLite"
     return f"""
     {BASE_CSS}
     <section class="ha-hero">
@@ -864,7 +894,7 @@ def hero_html():
       <div class="ha-chip-row">
         <span class="ha-mini-chip"><span class="ha-dot dot-blue"></span>MFDS</span>
         <span class="ha-mini-chip"><span class="ha-dot dot-green"></span>{esc(db_text)}</span>
-        <span class="ha-mini-chip"><span class="ha-dot dot-amber"></span>Daily Auto Collect</span>
+        <span class="ha-mini-chip"><span class="ha-dot dot-amber"></span>Manual Collect</span>
       </div>
     </section>
     """
@@ -1220,17 +1250,25 @@ def main():
 
     collect_start, collect_end = period_dates(period, start_date, end_date)
 
-    if get_meta("last_auto_collect_date", "") != TODAY.isoformat():
-        with st.spinner("최근 14일 기준 식약처 게시물을 자동 수집하여 DB에 누적 중입니다. 같은 날에는 1회만 자동 실행됩니다."):
+    # Supabase 운영형 기본값: 접속 시 자동 수집 OFF
+    # Secrets에서 AUTO_COLLECT_ON_LOAD = true로 둔 경우에만 1일 1회 자동 수집
+    if get_secret_bool("AUTO_COLLECT_ON_LOAD", False) and get_meta("last_auto_collect_date", "") != TODAY.isoformat():
+        with st.spinner("최근 14일 기준 식약처 게시물을 자동 수집하여 DB에 누적 중입니다."):
             auto_collect_once_per_day(TODAY - timedelta(days=14), TODAY)
 
     if collect_clicked:
-        with st.spinner(f"{collect_start} ~ {collect_end} 기간의 식약처 게시물을 수동 재수집하여 DB에 누적 중입니다."):
+        with st.spinner(f"{collect_start} ~ {collect_end} 기간의 식약처 게시물을 수집하여 Supabase DB에 누적 중입니다."):
             m_ins, m_skip, m_total = collect_mfds_to_db(collect_start, collect_end)
         st.success(f"수집 완료: 신규 {m_ins}건, 중복 제외 {m_skip}건")
         st.cache_data.clear()
 
     df = db_load_all()
+
+    if df.empty:
+        if is_supabase_mode():
+            st.info("Supabase DB에 아직 저장된 데이터가 없습니다. 기간을 선택한 뒤 [수동 재수집]을 눌러 최초 데이터를 수집해 주세요.")
+        else:
+            st.warning("DATABASE_URL 또는 SUPABASE_DB_URL이 설정되지 않아 Local SQLite fallback으로 실행 중입니다. 온라인 누적 운영은 Supabase 연결 후 사용하세요.")
 
     period_key = f"{period}|{start_date}|{end_date}|{st.session_state.get('keyword','')}"
     if period_key != st.session_state.get("last_period_key", ""):
@@ -1248,7 +1286,7 @@ def main():
 
     st.caption(
         f"ⓘ 본 대시보드는 식약처 목록 페이지에서 제목·등록일·링크만 수집합니다. "
-        f"DB 모드: {'External PostgreSQL' if is_external_db() else 'Local SQLite'} · 마지막 수집: {db_last_collected()}"
+        f"DB 모드: {'Supabase PostgreSQL' if is_supabase_mode() else 'Local SQLite'} · 마지막 수집: {db_last_collected()}"
     )
 
 
