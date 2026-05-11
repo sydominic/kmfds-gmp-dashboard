@@ -1278,11 +1278,11 @@ def main():
     with c2:
         input_period = st.selectbox("기간", ["오늘", "최근 7일", "최근 14일", "직접 선택"], index=["오늘", "최근 7일", "최근 14일", "직접 선택"].index(st.session_state.get("period_input", "최근 7일")) if st.session_state.get("period_input", "최근 7일") in ["오늘", "최근 7일", "최근 14일", "직접 선택"] else 1, label_visibility="collapsed", key="period_input")
     with c3:
-        query_clicked = st.button("조회", type="secondary", use_container_width=True)
+        query_clicked = st.button("조회", type="primary", use_container_width=True, help="선택한 기간과 검색어로 Supabase DB에 저장된 데이터만 조회합니다.")
     with c4:
-        fast_collect_clicked = st.button("빠른수집", type="primary", use_container_width=True)
+        fast_collect_clicked = st.button("빠른수집", type="primary", use_container_width=True, help="각 식약처 게시판의 첫 페이지만 빠르게 확인하여 신규 항목을 Supabase DB에 저장합니다.")
     with c5:
-        period_collect_clicked = st.button("기간수집", type="primary", use_container_width=True)
+        period_collect_clicked = st.button("기간수집", type="primary", use_container_width=True, help="선택한 기간 전체를 여러 페이지까지 확인하여 누락을 줄이고 Supabase DB에 저장합니다.")
 
     input_start_date = None
     input_end_date = None

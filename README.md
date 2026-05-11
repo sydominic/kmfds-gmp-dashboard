@@ -119,3 +119,14 @@ Secrets는 Streamlit Cloud Settings에서만 입력합니다.
 - Supabase 연결 실패 시 전체 Traceback 대신 DATABASE_URL 점검 안내를 표시합니다.
 - PostgreSQL 연결에 `connect_timeout=8`, `sslmode=require`를 적용했습니다.
 - DB 조회/수집 중 오류가 나면 원인 메시지를 화면에 표시하고 앱을 안전하게 중단합니다.
+
+
+## v4.1 수정사항
+- [조회] 버튼 스타일을 [빠른수집], [기간수집] 버튼과 동일한 primary 버튼 형태로 통일했습니다.
+
+
+## v4.2 수정사항
+- [조회], [빠른수집], [기간수집] 버튼에 마우스 오버 설명을 추가했습니다.
+- 조회: Supabase DB 저장 데이터만 조회
+- 빠른수집: 각 게시판 첫 페이지만 신규 확인
+- 기간수집: 선택 기간 전체를 여러 페이지까지 수집
