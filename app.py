@@ -132,7 +132,17 @@ def get_engine():
     connect_args = {}
     if url.startswith("sqlite:///"):
         connect_args = {"check_same_thread": False}
-    return create_engine(url, future=True, pool_pre_ping=True, connect_args=connect_args)
+    else:
+        # Supabase 연결 지연 시 Streamlit이 흰 로딩 화면에서 오래 멈추는 문제 방지
+        connect_args = {"connect_timeout": 8, "sslmode": "require"}
+
+    return create_engine(
+        url,
+        future=True,
+        pool_pre_ping=True,
+        pool_recycle=1800,
+        connect_args=connect_args,
+    )
 
 
 def is_external_db():
@@ -141,6 +151,17 @@ def is_external_db():
 
 def is_supabase_mode():
     return is_external_db()
+
+
+def db_mode_label():
+    return "Supabase PostgreSQL" if is_supabase_mode() else "Local SQLite"
+
+
+def safe_db_error_message(e):
+    msg = str(e)
+    msg = re.sub(r"postgresql://[^\s\"']+", "postgresql://***", msg)
+    msg = re.sub(r"postgres://[^\s\"']+", "postgres://***", msg)
+    return msg[:1400]
 
 
 def init_db():
@@ -1224,7 +1245,6 @@ def render_category_info_tab(df, period, start_date=None, end_date=None):
 def main():
     st.set_page_config(page_title="MFDS Regulatory Dashboard", layout="wide")
     page_css()
-    init_db()
 
     for k in ["main_page", "category_page"]:
         if k not in st.session_state:
@@ -1292,31 +1312,53 @@ def main():
         st.session_state["status_message"] = "조회 조건을 적용했습니다. Supabase DB에 저장된 데이터만 조회합니다."
         st.rerun()
 
-    auto_collect = get_secret_bool("AUTO_COLLECT_ON_LOAD", False)
-    if auto_collect and get_meta("last_auto_collect_date", "") != TODAY.isoformat():
-        with st.spinner("최근 14일 기준 식약처 게시물을 자동 수집하여 DB에 누적 중입니다."):
-            auto_collect_once_per_day(TODAY - timedelta(days=14), TODAY)
+    # DB 연결은 화면 구성 이후 수행한다.
+    # 연결 실패 시 무한 로딩/빨간 Traceback 대신 점검 안내를 표시한다.
+    try:
+        init_db()
+    except Exception as e:
+        st.error("Supabase DB 연결에 실패했습니다. 앱은 배포되었지만 DATABASE_URL 또는 Supabase 연결 설정을 확인해야 합니다.")
+        st.code(safe_db_error_message(e), language="text")
+        st.info(
+            "확인 순서: ① Streamlit Secrets의 DATABASE_URL이 실제 Supabase connection string인지 확인 "
+            "② postgres.xxxxxx가 예시값이 아니라 실제 프로젝트 값인지 확인 "
+            "③ [YOUR-PASSWORD]가 실제 DB 비밀번호로 교체되었는지 확인 "
+            "④ Supabase Connect > Direct > Transaction pooler 문자열 사용 "
+            "⑤ Secrets 저장 후 Reboot app"
+        )
+        st.stop()
 
-    if fast_collect_clicked:
-        apply_current_query()
-        with st.spinner(f"{input_collect_start} ~ {input_collect_end} 기간의 최신 게시물을 빠른수집 중입니다. 각 게시판 첫 페이지만 확인합니다."):
-            m_ins, m_skip, m_total = collect_mfds_to_db(input_collect_start, input_collect_end, collect_mode="fast")
-        st.session_state["status_message"] = f"빠른수집 완료: 신규 {m_ins}건, 중복 제외 {m_skip}건, 확인 {m_total}건"
-        st.cache_data.clear()
-        st.rerun()
+    try:
+        auto_collect = get_secret_bool("AUTO_COLLECT_ON_LOAD", False)
+        if auto_collect and get_meta("last_auto_collect_date", "") != TODAY.isoformat():
+            with st.spinner("최근 14일 기준 식약처 게시물을 자동 수집하여 DB에 누적 중입니다."):
+                auto_collect_once_per_day(TODAY - timedelta(days=14), TODAY)
 
-    if period_collect_clicked:
-        apply_current_query()
-        with st.spinner(f"{input_collect_start} ~ {input_collect_end} 기간 전체를 수집 중입니다. 여러 페이지를 확인하므로 시간이 걸릴 수 있습니다."):
-            m_ins, m_skip, m_total = collect_mfds_to_db(input_collect_start, input_collect_end, collect_mode="period")
-        st.session_state["status_message"] = f"기간수집 완료: 신규 {m_ins}건, 중복 제외 {m_skip}건, 확인 {m_total}건"
-        st.cache_data.clear()
-        st.rerun()
+        if fast_collect_clicked:
+            apply_current_query()
+            with st.spinner(f"{input_collect_start} ~ {input_collect_end} 기간의 최신 게시물을 빠른수집 중입니다. 각 게시판 첫 페이지만 확인합니다."):
+                m_ins, m_skip, m_total = collect_mfds_to_db(input_collect_start, input_collect_end, collect_mode="fast")
+            st.session_state["status_message"] = f"빠른수집 완료: 신규 {m_ins}건, 중복 제외 {m_skip}건, 확인 {m_total}건"
+            st.cache_data.clear()
+            st.rerun()
 
-    if st.session_state.get("status_message"):
-        st.info(st.session_state["status_message"])
+        if period_collect_clicked:
+            apply_current_query()
+            with st.spinner(f"{input_collect_start} ~ {input_collect_end} 기간 전체를 수집 중입니다. 여러 페이지를 확인하므로 시간이 걸릴 수 있습니다."):
+                m_ins, m_skip, m_total = collect_mfds_to_db(input_collect_start, input_collect_end, collect_mode="period")
+            st.session_state["status_message"] = f"기간수집 완료: 신규 {m_ins}건, 중복 제외 {m_skip}건, 확인 {m_total}건"
+            st.cache_data.clear()
+            st.rerun()
 
-    df = db_load_all()
+        if st.session_state.get("status_message"):
+            st.info(st.session_state["status_message"])
+
+        df = db_load_all()
+
+    except Exception as e:
+        st.error("DB 조회 또는 수집 처리 중 오류가 발생했습니다.")
+        st.code(safe_db_error_message(e), language="text")
+        st.stop()
 
     if df.empty:
         if is_supabase_mode():
@@ -1339,7 +1381,7 @@ def main():
 
     st.caption(
         f"ⓘ 본 대시보드는 식약처 목록 페이지에서 제목·등록일·링크만 수집합니다. "
-        f"DB 모드: {'Supabase PostgreSQL' if is_supabase_mode() else 'Local SQLite'} · 마지막 수집: {db_last_collected()}"
+        f"DB 모드: {db_mode_label()} · 마지막 수집: {db_last_collected()}"
     )
 
 
